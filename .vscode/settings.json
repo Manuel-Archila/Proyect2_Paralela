@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "des.h": "c",
+        "stdio.h": "c"
+    }
+}
