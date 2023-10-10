@@ -36,9 +36,7 @@ void decrypt_message(uint64_t key, unsigned char *ciphertext, unsigned char *dec
     }
 }
 
-char search[] = " the ";
-
-int tryKey(uint64_t key, unsigned char *ciph, int len) {
+int tryKey(uint64_t key, unsigned char *ciph, int len, char *search) {
     unsigned char temp[len+1];
     memcpy(temp, ciph, len);
     decrypt_message(key, temp, temp, len);
@@ -46,16 +44,39 @@ int tryKey(uint64_t key, unsigned char *ciph, int len) {
     return strstr((char *)temp, search) != NULL;
 }
 
-unsigned char cipher[] = {108, 245, 65, 63, 125, 200, 150, 66, 17, 170, 207, 170, 34, 31, 70, 215, 0};
-
 int main(int argc, char *argv[]) {
+
+    // Leer archivo de texto 
+    FILE *fp;
+    char *line = NULL;
+    size_t len = 0;
+    ssize_t read;
+    fp = fopen("entrada.txt", "r");
+    if (fp == NULL)
+        exit(EXIT_FAILURE);
+
+    char *plaintext = line;
+    while ((read = getline(&line, &len, fp)) != -1) {
+        plaintext = line;
+    }
+
+    fclose(fp);
+    printf("Texto recibido: %s\n", plaintext);
+
+    uint64_t key = strtoull(argv[1], NULL, 10); // 10 indica base decimal
+    printf("Key: %llu\n", key);
+
+
+    int length = strlen(plaintext);
+
+    unsigned char ciphertext[length];
+    encrypt_message(key, (unsigned char *)plaintext, ciphertext, length);
+    
     int N, id;
     long upper = (1L << 56); // límite superior para las llaves DES 2^56
     long mylower, myupper;
     MPI_Status st;
     MPI_Request req;
-    int flag;
-    int ciphlen = strlen((char *)cipher);
     MPI_Comm comm = MPI_COMM_WORLD;
 
     MPI_Init(NULL, NULL);
@@ -69,25 +90,40 @@ int main(int argc, char *argv[]) {
         myupper = upper;
     }
 
+    // Determinar la longitud del fragmento como el 60% del plaintext (al menos 5 caracteres)
+    int fragmentLength = length * 0.6;
+    if (fragmentLength < 5) fragmentLength = 5;
+
+    // Establecer una posición inicial aleatoria dentro del rango válido
+    srand(time(NULL));
+    int startPos = rand() % (length - fragmentLength + 1);
+
+    char search[fragmentLength + 1];
+    strncpy(search, plaintext + startPos, fragmentLength);
+    search[fragmentLength] = '\0';
+    
     long found = 0;
     MPI_Irecv(&found, 1, MPI_LONG, MPI_ANY_SOURCE, MPI_ANY_TAG, comm, &req);
 
     for(int i = mylower; i < myupper && !found; ++i) {
-        if(tryKey(i, cipher, ciphlen)) {
+        if(tryKey(i, ciphertext, length, search)) {
             found = i;
             for(int node = 0; node < N; node++) {
-                MPI_Send(&found, 1, MPI_LONG, node, 0, MPI_COMM_WORLD);
+                if(node != id){
+                    MPI_Send(&found, 1, MPI_LONG, node, 0, MPI_COMM_WORLD);
+                }
             }
             break;
         }
     }
 
-    if(id == 0) {
+
+    if(id == 0) { // nodo maestro
         MPI_Wait(&req, &st);
-        unsigned char decrypted[ciphlen+1];
-        decrypt_message(found, cipher, decrypted, ciphlen);
-        decrypted[ciphlen] = 0;
-        printf("%li %s\n", found, decrypted);
+        unsigned char decrypted[length+1];
+        decrypt_message(found, ciphertext, decrypted, length);
+        decrypted[length] = 0;
+        printf("Key found: %li\nDecrypted text: %s\n", found, decrypted);
     }
 
     MPI_Finalize();
