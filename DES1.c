@@ -10,8 +10,11 @@
 #include <openssl/des.h>
 #include <time.h>
 #include <stdlib.h>
+#include <pthread.h>
 
 #define BLOCK_SIZE 8
+#define FOUND_TAG 1
+#define NUM_THREADS 5  // número de hilos
 
 // Ajusta la paridad de la llave DES
 // Recibe un puntero a la llave
@@ -61,9 +64,55 @@ int tryKey(uint64_t key, unsigned char *ciph, int len, char *search) {
     return strstr((char *)temp, search) != NULL;
 }
 
-// Programa principal
-int main(int argc, char *argv[]) {
+// Estructura con la que se guardan los
+// argumentos de cada hilo
+typedef struct {
+    int thread_id;
+    long start;
+    long end;
+    unsigned char *ciphertext;
+    int length;
+    char *search;
+    long *found;
+    int *flag;
+    MPI_Request *req;
+    MPI_Status *st;
+    int *N;
+    int *id;
+} ThreadArgs;
 
+// Función que ejecuta cada hilo para probar las llaves DES
+// Recibe un puntero a los argumentos del hilo
+// Devuelve NULL
+void *tryKeyThread(void *arguments) {
+    ThreadArgs *args = (ThreadArgs *)arguments;
+
+    for(long i = args->start + args->thread_id; i < args->end && !(*args->flag); i += NUM_THREADS) {
+        
+        // Comprobar regularmente si se ha encontrado la clave en otro hilo o proceso
+        int mpiFlag;
+        MPI_Test(args->req, &mpiFlag, args->st); // Comprobar si se ha recibido un mensaje
+        if (mpiFlag || *args->flag) {
+            break; // Si hemos recibido un mensaje o flag está establecido, salimos del bucle
+        }
+        
+        if(tryKey(i, args->ciphertext, args->length, args->search)) { // Si la llave es correcta
+            *args->found = i;
+            *args->flag = 1;
+            for(int node = 0; node < *args->N; node++) {  
+                if(node != *args->id){  
+                    MPI_Send(args->found, 1, MPI_LONG, node, FOUND_TAG, MPI_COMM_WORLD);  // Enviar la llave a todos los procesos
+                }
+            }
+            break;
+        }
+    }
+    return NULL;
+}
+
+
+// Función principal
+int main(int argc, char *argv[]) {
     // Leer archivo de texto 
     FILE *fp;
     char *line = NULL;
@@ -74,23 +123,22 @@ int main(int argc, char *argv[]) {
     if (fp == NULL)
         exit(EXIT_FAILURE);
 
-    char *plaintext = line;
+    char *plaintext = line; 
     while ((read = getline(&line, &len, fp)) != -1) {
         plaintext = line;
     }
 
+
     fclose(fp);
-    printf("Texto recibido: %s\n", plaintext);
+    printf("Texto recibido: %s\n", plaintext); 
 
     uint64_t key = strtoull(argv[1], NULL, 10); // 10 indica base decimal
     printf("Key: %llu\n", key);
 
-
     int length = strlen(plaintext); // longitud del texto
-
     unsigned char ciphertext[length]; // texto cifrado
     encrypt_message(key, (unsigned char *)plaintext, ciphertext, length); // cifrar el texto
-    
+
     int N, id;
     long upper = (1L << 56); // límite superior para las llaves DES 2^56
     long mylower, myupper;
@@ -98,21 +146,18 @@ int main(int argc, char *argv[]) {
     MPI_Request req;
     MPI_Comm comm = MPI_COMM_WORLD;
 
+
     MPI_Init(NULL, NULL); // Inicializar MPI
-    MPI_Comm_size(comm, &N); // Número de nodos
-    MPI_Comm_rank(comm, &id); // ID del nodo actual
+    MPI_Comm_size(comm, &N); // Número de procesos
+    MPI_Comm_rank(comm, &id); // ID del proceso
 
     start_time = MPI_Wtime(); // Iniciar cronómetro
- 
-    long range_per_node = upper / N; // rango de llaves por nodo
-    mylower = range_per_node * id; // límite inferior de llaves para el nodo actual
-    myupper = range_per_node * (id+1) - 1; // límite superior de llaves para el nodo actual
-    if(id == N-1) { // último nodo
+    long range_per_node = upper / N; // Rango de llaves por proceso
+    mylower = range_per_node * id; // Límite inferior de llaves para el proceso
+    myupper = range_per_node * (id+1) - 1; // Límite superior de llaves para el proceso
+    if(id == N-1) { // Si es el último proceso, el límite superior es el límite superior global
         myupper = upper;
     }
-
-    printf("Node %d: %li - %li\n", id, mylower, myupper); 
-    
 
     // Determinar la longitud del fragmento como el 60% del plaintext (al menos 5 caracteres)
     int fragmentLength = length * 0.6;
@@ -123,46 +168,60 @@ int main(int argc, char *argv[]) {
     int startPos = rand() % (length - fragmentLength + 1);
 
     char search[fragmentLength + 1];
-    strncpy(search, plaintext + startPos, fragmentLength); 
-    search[fragmentLength] = '\0'; // terminar la cadena
-    
-    long found = 0;
-    MPI_Irecv(&found, 1, MPI_LONG, MPI_ANY_SOURCE, MPI_ANY_TAG, comm, &req); // Recibir mensaje de cualquier nodo
+    strncpy(search, plaintext + startPos, fragmentLength);
+    search[fragmentLength] = '\0'; // Añadir el caracter nulo al final
 
-    for(long i = mylower; i < myupper && !found; ++i) { // probar llaves
-        int flag;
-        MPI_Test(&req, &flag, &st); // Verificar si hemos recibido un mensaje
-        if (flag) {
-            break; // Si hemos recibido un mensaje, salimos del bucle
-        }
-        
-        if(tryKey(i, ciphertext, length, search)) { // Si la llave es correcta
-            found = i;
-            for(int node = 0; node < N; node++) {
-                if(node != id){
-                    MPI_Send(&found, 1, MPI_LONG, node, 0, MPI_COMM_WORLD); // Enviar mensaje a todos los nodos
-                }
-            }
-            break;
-        }
+    long found = 0;
+    int flag = 0;
+    MPI_Irecv(&found, 1, MPI_LONG, MPI_ANY_SOURCE, FOUND_TAG, MPI_COMM_WORLD, &req);
+
+    pthread_t threads[NUM_THREADS];
+    ThreadArgs args[NUM_THREADS];
+
+    // Establecer los argumentos de cada hilo
+    for (int i = 0; i < NUM_THREADS; i++) {
+        args[i].thread_id = i;
+        args[i].start = mylower;
+        args[i].end = myupper;
+        args[i].ciphertext = ciphertext;
+        args[i].length = length;
+        args[i].search = search;
+        args[i].found = &found;
+        args[i].flag = &flag;
+        args[i].req = &req;
+        args[i].st = &st;
+        args[i].N = &N;
+        args[i].id = &id;
+        pthread_create(&threads[i], NULL, tryKeyThread, &args[i]);
     }
 
 
-    if(id == 0) { // nodo maestro
-        MPI_Wait(&req, &st); // Esperar a que todos los nodos terminen
+    // Establecer los argumentos de cada hilo
+    for (int i = 0; i < NUM_THREADS; i++) {
+        pthread_join(threads[i], NULL);
+    }
+
+
+    // Verificacion de hilo
+    if (id == 0) {
+        if (!found) {  // Si el proceso con id=0 no encontró la llave, espera el mensaje.
+            MPI_Wait(&req, &st);
+        }
+
+
         unsigned char decrypted[length+1]; // texto descifrado
         decrypt_message(found, ciphertext, decrypted, length); // descifrar el texto
-        decrypted[length] = 0; // terminar la cadena
-        printf("Key found: %li\nDecrypted text: %s\n", found, decrypted); // imprimir resultados
+        decrypted[length] = 0; // añadir el caracter nulo al final
+        printf("Key found: %li\nDecrypted text: %s\n", found, decrypted); // imprimir la llave y el texto descifrado
     }
-    end_time = MPI_Wtime(); // detener cronómetro
-     
-    if(id == 0) { // Solo en el nodo maestro
+
+    end_time = MPI_Wtime(); // Parar cronómetro
+
+    if (id == 0) {
         printf("Duration: %f seconds\n", end_time - start_time);
     }
 
-
-    MPI_Finalize(); // Finalizar MPI
+    MPI_Finalize();
 
     return 0;
 }

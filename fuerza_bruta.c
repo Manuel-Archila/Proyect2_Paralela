@@ -13,6 +13,7 @@
 #define BLOCK_SIZE 8
 
 // Función para ajustar la paridad de la llave
+// Recibe la llave
 void adjust_key_parity(uint64_t *key) { // Ajustar la paridad de la llave 
     uint64_t adjusted_key = 0;
     for (int i = 0; i < 8; ++i) {
@@ -24,6 +25,7 @@ void adjust_key_parity(uint64_t *key) { // Ajustar la paridad de la llave
 }
 
 // Función para encriptar un mensaje
+// Recibe la llave, el mensaje plano, el mensaje cifrado y la longitud del mensaje
 void encrypt_message(uint64_t key, unsigned char *plaintext, unsigned char *ciphertext, int length) {
     adjust_key_parity(&key); // Ajustar la paridad de la llave antes de usarla
     DES_key_schedule schedule;
@@ -34,6 +36,7 @@ void encrypt_message(uint64_t key, unsigned char *plaintext, unsigned char *ciph
 }
 
 // Función para desencriptar un mensaje
+// Recibe la llave, el mensaje cifrado, el mensaje desencriptado y la longitud del mensaje
 void decrypt_message(uint64_t key, unsigned char *ciphertext, unsigned char *decryptedtext, int length) {
     adjust_key_parity(&key); // Ajustar la paridad de la llave antes de usarla
     DES_key_schedule schedule;
@@ -44,6 +47,7 @@ void decrypt_message(uint64_t key, unsigned char *ciphertext, unsigned char *dec
 }
 
 // Función para probar una llave y determinar si es la correcta
+// Retorna 1 si la llave es correcta, 0 si no lo es
 int tryKey(uint64_t key, unsigned char *ciph, int len, char *search) {
     unsigned char temp[len+1];
     memcpy(temp, ciph, len); // Copiar el mensaje cifrado en un arreglo temporal
